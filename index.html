@@ -1421,7 +1421,7 @@ Defaulting to \`null\`.`}var CW=EW,OMA=BW;const mE=Q.forwardRef(({className:A,va
         }
 
         async function pushChangedRows(table) {
-          if (!currentUser) { console.log("[Deskly Push Trace] pushChangedRows exiting early", { table, reason: "not signed in (currentUser is null)" }); return; }
+          if (!currentUser) { console.log("[Deskly Push Trace] pushChangedRows exiting early - table=" + table + " reason=not signed in (currentUser is null)"); return; }
           const identity = currentUser.uid;
           let rows;
           try { rows = await readAll(table); } catch (e) { console.log("[Deskly Firebase] read failed", table, e?.message || e); return; }
@@ -1430,7 +1430,7 @@ Defaulting to \`null\`.`}var CW=EW,OMA=BW;const mE=Q.forwardRef(({className:A,va
           let dirty = false;
           for (const row of rows) {
             if (!row || row.id === undefined || row.id === null) {
-              console.log("[Deskly Push Trace] skipping row before reaching Firestore write", { table, reason: "row is missing or has no id", row });
+              console.log("[Deskly Push Trace] skipping row before reaching Firestore write - table=" + table + " reason=row is missing or has no id", row);
               continue;
             }
             const id = String(row.id);
@@ -1449,25 +1449,35 @@ Defaulting to \`null\`.`}var CW=EW,OMA=BW;const mE=Q.forwardRef(({className:A,va
             // state is checked rather than assumed.
             if (cache.has(id)) {
               try {
-                const currentDoc = await firestoreWithTimeout(firestoreMod.getDoc(ref), 15000, "pre-push existence check for " + table + "/" + id);
+                // getDoc() can be satisfied entirely from Firestore's own
+                // local persistence cache without ever reaching the server -
+                // which means it can report "exists: true" based purely on
+                // this client's own earlier optimistic write, even when the
+                // true backend never actually has the document. That is
+                // exactly how this bug persisted: the existence check itself
+                // was asking a source that could be wrong for the same reason
+                // the original write was wrong. getDocFromServer() forces a
+                // real round trip to the backend - it only ever reports
+                // genuine server truth, or fails outright (caught below).
+                const currentDoc = await firestoreWithTimeout(firestoreMod.getDocFromServer(ref), 15000, "pre-push existence check (server) for " + table + "/" + id);
                 if (currentDoc.exists() && currentDoc.data()?._deleted) {
-                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write", { table, recordId: id, path: ref.path, reason: "server copy is tombstoned (deleted elsewhere) - discarding local copy instead of pushing" });
+                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write - table=" + table + " recordId=" + id + " path=" + ref.path + " reason=server copy is tombstoned (deleted elsewhere), discarding local copy instead of pushing");
                   await deleteRow(table, id).catch(e => console.log("[Deskly Firebase] local delete failed", table, id, e?.message || e));
                   cache.delete(id);
                   dirty = true;
                   continue;
                 }
                 if (!currentDoc.exists()) {
-                  console.log("[Deskly Push Trace] cache claimed this record was already synced, but the remote document does not exist - forcing a push instead of skipping", { table, recordId: id, path: ref.path });
+                  console.log("[Deskly Push Trace] cache claimed this record was already synced, but getDocFromServer confirms the remote document does NOT exist - forcing a push instead of skipping - table=" + table + " recordId=" + id + " path=" + ref.path);
                   cache.delete(id); // the cache was wrong - fall through to push below with a clean slate
                 } else if (cache.get(id) === json) {
-                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write", { table, recordId: id, path: ref.path, reason: "confirmed to exist remotely AND unchanged since last sync - nothing to push" });
+                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write - table=" + table + " recordId=" + id + " path=" + ref.path + " reason=getDocFromServer confirms the document genuinely exists AND is unchanged since last sync, nothing to push");
                   continue;
                 }
               } catch (e) {
                 console.log("[Deskly Firebase] pre-push check failed", table, id, e?.code || e?.message || e);
                 if (cache.get(id) === json) {
-                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write", { table, recordId: id, path: ref.path, reason: "could not verify remote state (offline/error) - trusting the existing cache for this cycle rather than blocking" });
+                  console.log("[Deskly Push Trace] skipping row before reaching Firestore write - table=" + table + " recordId=" + id + " path=" + ref.path + " reason=could not verify remote state (offline or error) - trusting the existing cache for this cycle rather than blocking, will re-verify next cycle");
                   continue;
                 }
               }
